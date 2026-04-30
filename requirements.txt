@@ -1,0 +1,4 @@
+mediapipe>=0.10.30
+opencv-python>=4.10.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
