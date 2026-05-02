@@ -1,204 +1,267 @@
-# Hand Gesture Recognizer
+# HandLink: A Vision-Based Hand Gesture Recognition System for macOS Media Control
 
-Real-time hand gesture recognition from webcam using MediaPipe hand landmarks and a scikit-learn neural network classifier.
+HandLink recognises hand gestures in real time from a webcam and maps them to macOS media actions — volume up/down and play/pause — using native CoreGraphics HID events, fully compatible with macOS Tahoe.
 
-## Overview
+---
 
-This project captures hand gestures via webcam, extracts hand landmark features, trains a machine learning model, and performs live gesture recognition with confidence scores displayed on the video feed.
+## How It Works
 
-**Key Features:**
-- Real-time hand detection and landmark extraction using MediaPipe
-- Custom gesture data collection pipeline
-- Neural network (MLP) classification trained on collected samples
-- Live inference with temporal smoothing for stable predictions
-- Visual feedback with skeleton overlay and confidence percentage
+```
+Webcam → MediaPipe HandLandmarker → Scale-normalised 63-D features
+    → MLPClassifier + confidence gate → Temporal smoother (7-frame vote)
+    → Gesture label → Action dispatcher → CoreGraphics HID media-key event
+```
+
+The classifier runs every frame. Only predictions above a confidence threshold enter the voting buffer; uncertain frames flush the buffer immediately. When a mapped gesture has been held continuously for its required hold duration (and the post-fire cooldown has elapsed), a Quartz HID event is posted directly into the macOS input stream — no Automation permission required.
+
+---
+
+## Supported Gestures
+
+| Gesture | Hand pose | Action | Hold | Cooldown |
+|---|---|---|---|---|
+| `fist` | All fingers curled tightly into palm | Play / Pause | 0.35 s | 3 s |
+| `thumbs_up` | Fist with thumb pointing straight up | Volume + | instant | 1 s |
+| `thumbs_down` | Fist with thumb pointing straight down | Volume − | instant | 1 s |
+| `open_hand` | All five fingers fully extended and spread | *(recognised, no action)* | — | — |
+| `peace` | Index + middle fingers raised in a V | *(recognised, no action)* | — | — |
+| `pointing` | Index finger extended forward, others curled | *(recognised, no action)* | — | — |
+| `stop` | All fingers together, palm facing camera | *(recognised, no action)* | — | — |
+| `none` | Random non-gesture hand poses | *(silence class)* | — | — |
+
+Gestures with no action are still classified and shown in the UI; they simply do not trigger any system command. New actions can be wired up in `src/actions.py` without touching any other file.
+
+---
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
-| **Hand Detection** | MediaPipe (hand_landmarker.task) |
-| **Computer Vision** | OpenCV |
-| **ML Model** | scikit-learn MLPClassifier |
-| **Data Processing** | NumPy |
+| Layer | Technology |
+|---|---|
+| Hand detection | MediaPipe `HandLandmarker` (Tasks API, float16) |
+| Computer vision | OpenCV |
+| ML classifier | scikit-learn `MLPClassifier` |
+| Numerical ops | NumPy |
+| macOS media control | `pyobjc-framework-Quartz` — CoreGraphics HID events |
 
-**Requirements:**
-- Python 3.8+
-- Webcam
+**Requirements:** Python 3.10+, macOS, webcam.
+
+---
 
 ## Installation
 
-1. **Clone/navigate to the project:**
-   ```bash
-   cd hand-gesture-recognizer
-   ```
+```bash
+# 1. Clone and enter the project
+git clone <repo-url> HandLink
+cd HandLink
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+# 2. Install dependencies
+pip install -r requirements.txt
+```
 
-   This installs:
-   - `mediapipe>=0.10.30` — hand landmark detection
-   - `opencv-python>=4.10.0` — video capture & rendering
-   - `numpy>=1.26.0` — numerical operations
-   - `scikit-learn>=1.4.0` — machine learning
+`requirements.txt` installs:
+
+| Package | Purpose |
+|---|---|
+| `mediapipe>=0.10.30` | Hand landmark detection |
+| `opencv-python>=4.10.0` | Video capture and rendering |
+| `numpy>=1.26.0` | Array operations |
+| `scikit-learn>=1.4.0` | MLP classifier and scaler |
+| `pyobjc-framework-Quartz>=10.0` | macOS media-key HID events |
+
+---
 
 ## Usage
 
-### Step 1: Collect Gesture Data
-
-Record samples for each gesture (you need at least 50-100 samples per gesture):
+### 1 — Collect gesture data
 
 ```bash
-python src/collect_data.py --gesture fist --samples 200
-python src/collect_data.py --gesture open_hand --samples 200
-python src/collect_data.py --gesture peace --samples 200
-python src/collect_data.py --gesture thumbs_up --samples 200
+# Core gestures
+python src/collect_data.py --gesture fist        --samples 300
+python src/collect_data.py --gesture open_hand   --samples 300
+python src/collect_data.py --gesture peace       --samples 300
+python src/collect_data.py --gesture thumbs_up   --samples 300
+python src/collect_data.py --gesture thumbs_down --samples 300
+python src/collect_data.py --gesture pointing    --samples 300
+python src/collect_data.py --gesture stop        --samples 300
+
+# Silence class — collect varied non-gesture hand poses
+python src/collect_data.py --gesture none        --samples 500
 ```
 
 **During collection:**
-- Press `SPACE` to start a 3-second countdown
-- Hold your gesture still during recording
-- Press `Q` to quit early
-- Data is saved to `data/<gesture>.npy`
+- The camera feed stays live throughout — a real-time countdown replaces the old blocking freeze.
+- The on-screen description tells you exactly what hand pose to hold.
+- Press `SPACE` to start a 3-second countdown, then hold the gesture.
+- Press `Q` to quit early; any samples collected so far are saved.
+- Running the command again for the same gesture **appends** to the existing file.
 
-### Step 2: Train the Model
+**Tips for cross-person generalisation:**
+- Collect in 2–3 short sessions rather than one long one.
+- Vary your distance from the camera (40 cm, 60 cm, 80 cm) and wrist tilt (±20°).
+- Use the front of one hand consistently (right hand, palm facing camera).
+
+### 2 — Train the model
 
 ```bash
 python src/train.py --data-dir data --model-dir models
 ```
 
-This:
-- Loads all `.npy` files from `data/`
-- Extracts hand landmark features (63 floats per sample: x,y,z × 21 landmarks)
-- Trains an MLPClassifier on the dataset
-- Saves model artifacts:
-  - `models/gesture_model.pkl` — trained classifier
-  - `models/label_map.pkl` — gesture name mapping
-  - `models/scaler.pkl` — feature scaler
+Training prints a per-class classification report and saves three files:
 
-### Step 3: Run Live Recognition
+| File | Contents |
+|---|---|
+| `models/gesture_model.pkl` | Trained `MLPClassifier` |
+| `models/label_map.pkl` | `{index: gesture_name}` dict |
+| `models/scaler.pkl` | Fitted `StandardScaler` |
+
+### 3 — Run live recognition
 
 ```bash
-python src/recognize.py --model-dir models
+python src/recognize.py
+
+# Optional flags
+python src/recognize.py --conf-threshold 0.75   # raise confidence gate (default 0.70)
+python src/recognize.py --smoothing 10           # wider vote window (default 7)
 ```
 
-This starts live gesture recognition:
-- Webcam feed with hand skeleton overlay (green lines)
-- Real-time gesture classification with confidence %
-- Temporal smoothing (last 7 predictions averaged)
-- Press `Q` to quit
+**What you see:**
 
-## Supported Gestures
+| UI element | Location | Meaning |
+|---|---|---|
+| Green skeleton | Over detected hand(s) | MediaPipe landmarks |
+| Bottom banner — green label | Gesture name | Confident, mapped gesture |
+| Bottom banner — grey label | Gesture name | Confident, unmapped gesture |
+| Bottom banner — confidence % | Bottom right | Classifier probability |
+| Top-right HUD — label | e.g. `Play/Pause` | Last fired action |
+| Top-right HUD — progress bar | Fills left → right | Cooldown remaining (orange → green) |
+| `Uncertain (XX%)` | Top left | Hand visible but below confidence threshold |
+| `No hand detected` | Top left | No hand in frame |
 
-Four gestures are recognized:
-- **fist** — closed fist
-- **open_hand** — open palm
-- **peace** — peace sign (two fingers up)
-- **thumbs_up** — thumbs up
+Press `Q` to quit.
 
-*Pre-collected training data is included for all four gestures.*
+---
 
 ## Architecture
 
-### Data Pipeline
+### Feature engineering
 
-```
-Webcam → MediaPipe HandLandmarker (21 landmarks per hand)
-    ↓
-Extract Features (63D: x,y,z offset from wrist)
-    ↓
-Normalize & Scale
-    ↓
-MLPClassifier Prediction
-    ↓
-Temporal Smoothing (voting over last N frames)
-    ↓
-Display Label + Confidence
+MediaPipe returns 21 (x, y, z) normalised-image-coordinate landmarks per hand. HandLink transforms them into a 63-dimensional feature vector with two invariance properties:
+
+**Translation invariance** — every landmark is offset by the wrist (landmark 0), so the hand's position on screen does not affect the features.
+
+**Scale invariance** — every coordinate is divided by the 2-D Euclidean distance from the wrist to the middle-finger MCP joint (landmark 9). This makes features the same regardless of hand size or camera distance, which is the primary fix for cross-person generalisation.
+
+```python
+scale = hypot(ref.x - wrist.x, ref.y - wrist.y)   # landmark 9 vs landmark 0
+feature[i] = (lm[i] - wrist) / scale
 ```
 
-### Feature Engineering
+### Augmentation
 
-- **21 hand landmarks** detected by MediaPipe (wrist, fingers, knuckles)
-- **63 features** per frame: (x, y, z) coordinates relative to wrist
-- **Sample shape**: (N, 63) NumPy arrays stored in `data/<gesture>.npy`; N = number of captured frames
-- **Translation invariance**: Each landmark (x, y, z) is offset by wrist coordinates so features are position-invariant
-- **Scaling**: StandardScaler fitted on training data and applied to both train and test splits
+To further reduce overfitting to a single person's hand, the training split (not the test split) receives 4× synthetic copies:
 
-**Data Collection Mechanics:**
-**Architecture:**
-- **Algorithm**: Multi-Layer Perceptron (MLPClassifier from scikit-learn) — supervised learning on labeled landmark features
-- **Input**: 63-dimensional feature vectors (21 landmarks × 3 coordinates)
-- **Hidden layers**: 128 → 64 neurons
-- **Activation function**: ReLU (Rectified Linear Unit: f(x) = max(0, x))
-- **Output**: 4 class probabilities (one per gesture)
-- **Total parameters**: ~16.7k (63×128 + 128 + 128×64 + 64 + 64×4 + 4)
-- **Training hyperparams**: max_iter=500, early_stopping=True, validation_fraction=0.1, random_state=42
-- **Test accuracy**: 100% (on 80/20 train/test split with 200 samples per gesture)
+- **Random 2-D in-plane rotation** ±20° around the wrist — simulates different hand tilts.
+- **Gaussian landmark noise** σ = 0.02 (in normalised units) — simulates finger-proportion variation and detector jitter.
 
-**Inference & Smoothing:**
-- **Temporal smoothing**: Majority voting over a rolling deque of the last 7 predictions
-- **Data structure**: `collections.deque(maxlen=7)` stores recent predicted class indices; smoothed label = most frequent class
-- **Error handling**: If no hand is detected, skips feature extraction and displays "No hand detected" (prior predictions fade as deque ages)
+Combined with the 300-sample base and 5× augmentation, the MLP trains on ~9,800 samples for 7 gesture classes.
 
-**Skeleton Overlay:**
-- Green hand skeleton drawn via `cv2.line()` connecting 21 landmarks
-- Connections follow anatomical hand structure (thumb chain, finger chains, palm)
-- Landmarks rendered as white-filled circles with green outlines
-### Model Details
+### Classifier
 
-- **Algorithm**: Multi-Layer Perceptron (MLPClassifier from scikit-learn)
-- **Input**: 63-dimensional feature vectors
-- **Output**: Class probabilities for each gesture
-- **Smoothing**: Majority voting over the last 7 predictions for temporal stability
+| Hyperparameter | Value | Reason |
+|---|---|---|
+| Architecture | 128 → 64 → N classes | Sufficient capacity for 63-D input |
+| Activation | ReLU | Standard for MLPs |
+| L2 regularisation (`alpha`) | `0.01` | 100× default — key lever against single-person overfitting |
+| Early stopping | `validation_fraction=0.1` | Prevents overtraining |
+| `max_iter` | 500 | Upper bound; early stopping typically kicks in first |
+
+### Temporal smoothing and confidence gating
+
+Every frame, the raw classifier output goes through two filters before a label is displayed or an action is fired:
+
+1. **Confidence gate** — if `max(proba) < threshold` (default 0.70), the prediction is discarded and the vote buffer is flushed. This is what silences phantom predictions when no deliberate gesture is shown.
+2. **Majority-vote smoother** — a `deque(maxlen=7)` of recent class indices; the displayed label is the mode. Frames that fail the confidence gate clear the buffer, so a dropped hand never leaves a stale label on screen.
+
+### Action system and macOS Tahoe compatibility
+
+Media controls use `Quartz.NSEvent.otherEventWithType…` + `CGEventPost` to post `NSSystemDefined` HID events with `NX_KEYTYPE_*` constants from `hidsystem/ev_keymap.h`. This is identical to what a physical media key produces and requires **no Automation or Accessibility permissions**.
+
+This approach was adopted because:
+- `osascript "set volume output volume"` silently fails on Tahoe without explicit Automation permission for the Python interpreter.
+- `tell application "System Events" to key code 179` opens the emoji picker on Tahoe — `179` is outside the standard 0–127 key code range.
+
+| NX constant | Value | Used for |
+|---|---|---|
+| `NX_KEYTYPE_SOUND_UP` | 0 | Volume + |
+| `NX_KEYTYPE_SOUND_DOWN` | 1 | Volume − |
+| `NX_KEYTYPE_PLAY` | 16 | Play / Pause toggle |
+
+Each action has an independent **cooldown** (locks out re-firing) and an optional **hold duration** (gesture must be continuously detected before the action fires):
+
+- Volume gestures fire instantly with a 1-second cooldown.
+- Play/Pause requires a **0.35-second continuous hold** (prevents accidental triggers from a briefly-clenched fist) and a 3-second cooldown (prevents the toggle from flipping back immediately).
+
+The hold timer resets whenever the gesture disappears — confidence drop, hand leaving frame, or gesture change — so a partial hold never carries over.
+
+---
 
 ## File Structure
 
 ```
-hand-gesture-recognizer/
-├── README.md              # This file
-├── requirements.txt       # Python dependencies
-├── data/                  # Pre-collected training data
+HandLink/
+├── README.md
+├── requirements.txt
+├── data/                        # Collected training samples (.npy per gesture)
 │   ├── fist.npy
 │   ├── open_hand.npy
 │   ├── peace.npy
-│   └── thumbs_up.npy
-├── models/                # Trained models & MediaPipe asset
-│   └── hand_landmarker.task
+│   ├── thumbs_up.npy
+│   ├── thumbs_down.npy
+│   ├── pointing.npy
+│   ├── stop.npy
+│   └── none.npy
+├── models/
+│   ├── gesture_model.pkl        # Trained MLPClassifier
+│   ├── label_map.pkl            # {index → gesture name}
+│   ├── scaler.pkl               # Fitted StandardScaler
+│   └── hand_landmarker.task     # MediaPipe model (auto-downloaded)
 └── src/
-    ├── collect_data.py    # Data collection script
-    ├── train.py           # Model training script
-    ├── recognize.py       # Live recognition script
-    └── mp_utils.py        # MediaPipe utilities
+    ├── config.py                # Gesture registry (names + descriptions)
+    ├── actions.py               # Gesture → macOS action mapping + cooldown/hold logic
+    ├── mp_utils.py              # MediaPipe helpers, feature extraction
+    ├── collect_data.py          # Interactive data collection
+    ├── train.py                 # Model training + augmentation
+    └── recognize.py             # Live recognition loop + HUD rendering
 ```
 
-## Example Workflow
+---
 
-```bash
-# 1. Collect 200 samples for each gesture
-for gesture in fist open_hand peace thumbs_up; do
-  python src/collect_data.py --gesture $gesture --samples 200
-done
+## Adding a New Gesture
 
-# 2. Train the model
-python src/train.py --data-dir data --model-dir models
+1. **Register it** in `src/config.py` — add a name and pose description to `GESTURES`.
+2. **Collect data** — `python src/collect_data.py --gesture <name> --samples 300`
+3. **Retrain** — `python src/train.py`
+4. *(Optional)* **Wire an action** — add an entry to `ACTIONS` in `src/actions.py`.
 
-# 3. Run live recognition
-python src/recognize.py --model-dir models
+## Adding a New Action
+
+Edit `ACTIONS` in `src/actions.py`:
+
+```python
+"pointing": Action("Action label", NX_KEYTYPE_CONSTANT, cooldown=1.0, hold_seconds=0.0),
 ```
+
+No other file needs to change.
+
+---
 
 ## Troubleshooting
 
-- **"No hand detected"** → Ensure adequate lighting and hand is clearly visible
-- **"Missing model"** → Run `train.py` first to generate model files
-- **Slow/laggy recognition** → Reduce gesture complexity or increase training samples
-- **Webcam not working** → Check camera permissions and test with `cv2.VideoCapture(0)`
-
-## Tips for Best Results
-
-1. **Collect diverse samples** — vary hand position, angle, and scale
-2. **Use consistent lighting** — train and test under similar conditions
-3. **More data = better accuracy** — aim for 200+ samples per gesture
-4. **Clear gestures** — ensure gestures are visually distinct
-5. **Re-train regularly** — add new samples and retrain to improve performance
+| Symptom | Fix |
+|---|---|
+| Phantom gestures when hand is idle | Lower `--conf-threshold` slightly or collect more `none` samples |
+| Works for you but not others | Re-collect data at varied distances/tilts; scale invariance handles size differences |
+| Volume / play-pause has no effect | Install `pyobjc-framework-Quartz`: `pip install pyobjc-framework-Quartz` |
+| "Missing model" error | Run `python src/train.py` first |
+| Webcam not opening | Check macOS camera permissions for Terminal / your IDE |
+| Gesture flickers between labels | Increase `--smoothing` (e.g. `--smoothing 12`) |

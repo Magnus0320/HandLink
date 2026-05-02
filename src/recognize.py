@@ -171,7 +171,7 @@ def run(
                     f"Q = quit  |  threshold: {conf_threshold:.0%}",
                     (10, h - 80),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-        cv2.imshow("Gesture Recognizer", frame)
+        cv2.imshow("HandLink", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
