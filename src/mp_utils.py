@@ -5,6 +5,7 @@ The old mp.solutions.hands context-manager API is gone in 0.10.30+.
 We now use mp.tasks.python.vision.HandLandmarker directly.
 """
 
+import math
 import os
 import urllib.request
 
@@ -64,15 +65,30 @@ HAND_CONNECTIONS = [
 
 def extract_landmarks(hand_landmarks: list) -> list[float]:
     """
-    Return 63 floats: (x, y, z) * 21 landmarks, each offset by the wrist
-    so the features are translation-invariant.
+    Return 63 floats: (x, y, z) × 21 landmarks.
 
-    hand_landmarks is the List[NormalizedLandmark] from result.hand_landmarks[i].
+    • Translation-invariant: every coordinate is offset by the wrist
+      (landmark 0), so the hand position on screen doesn't matter.
+
+    • Scale-invariant: divided by the 2-D wrist → middle-finger MCP
+      (landmark 9) distance, so hand size and camera distance don't
+      affect the features.  This is the key fix for cross-person
+      generalisation — different people have proportionally similar
+      hands even if the absolute pixel size varies.
     """
     wrist = hand_landmarks[0]
+    ref   = hand_landmarks[9]          # middle-finger MCP — stable reference
+    scale = math.hypot(ref.x - wrist.x, ref.y - wrist.y)
+    if scale < 1e-6:
+        scale = 1e-6                   # guard against degenerate / edge frames
+
     coords: list[float] = []
     for lm in hand_landmarks:
-        coords.extend([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
+        coords.extend([
+            (lm.x - wrist.x) / scale,
+            (lm.y - wrist.y) / scale,
+            (lm.z - wrist.z) / scale,
+        ])
     return coords
 
 

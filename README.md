@@ -122,9 +122,30 @@ Display Label + Confidence
 
 - **21 hand landmarks** detected by MediaPipe (wrist, fingers, knuckles)
 - **63 features** per frame: (x, y, z) coordinates relative to wrist
-- **Translation invariance**: Features are normalized to wrist position
-- **Scaling**: StandardScaler applied before training
+- **Sample shape**: (N, 63) NumPy arrays stored in `data/<gesture>.npy`; N = number of captured frames
+- **Translation invariance**: Each landmark (x, y, z) is offset by wrist coordinates so features are position-invariant
+- **Scaling**: StandardScaler fitted on training data and applied to both train and test splits
 
+**Data Collection Mechanics:**
+**Architecture:**
+- **Algorithm**: Multi-Layer Perceptron (MLPClassifier from scikit-learn) — supervised learning on labeled landmark features
+- **Input**: 63-dimensional feature vectors (21 landmarks × 3 coordinates)
+- **Hidden layers**: 128 → 64 neurons
+- **Activation function**: ReLU (Rectified Linear Unit: f(x) = max(0, x))
+- **Output**: 4 class probabilities (one per gesture)
+- **Total parameters**: ~16.7k (63×128 + 128 + 128×64 + 64 + 64×4 + 4)
+- **Training hyperparams**: max_iter=500, early_stopping=True, validation_fraction=0.1, random_state=42
+- **Test accuracy**: 100% (on 80/20 train/test split with 200 samples per gesture)
+
+**Inference & Smoothing:**
+- **Temporal smoothing**: Majority voting over a rolling deque of the last 7 predictions
+- **Data structure**: `collections.deque(maxlen=7)` stores recent predicted class indices; smoothed label = most frequent class
+- **Error handling**: If no hand is detected, skips feature extraction and displays "No hand detected" (prior predictions fade as deque ages)
+
+**Skeleton Overlay:**
+- Green hand skeleton drawn via `cv2.line()` connecting 21 landmarks
+- Connections follow anatomical hand structure (thumb chain, finger chains, palm)
+- Landmarks rendered as white-filled circles with green outlines
 ### Model Details
 
 - **Algorithm**: Multi-Layer Perceptron (MLPClassifier from scikit-learn)
