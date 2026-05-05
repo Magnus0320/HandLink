@@ -1,11 +1,12 @@
 """
 Gesture → macOS media action mapping.
 
-Media controls are implemented via CoreGraphics HID events (pyobjc-framework-Quartz).
-NX_KEYTYPE_* constants are posted as NSSystemDefined events through CGEventPost,
-which is identical to a physical media key press and requires no special permissions.
+Volume and play/pause use CoreGraphics HID events (pyobjc-framework-Quartz).
+Track skipping uses AppleScript (osascript) targeting Music.app directly —
+NX_KEYTYPE_NEXT/PREVIOUS HID events are not reliably delivered to Apple Music
+on macOS Tahoe.
 
-Dependency:  pip install pyobjc-framework-Quartz
+Dependency for volume/play:  pip install pyobjc-framework-Quartz
 
 Public API:
     try_fire(gesture)   → str | None   fire action, return label, or None
@@ -14,7 +15,9 @@ Public API:
     reset_hold()        → None         call when the active gesture disappears
 """
 
+import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 try:
@@ -63,20 +66,43 @@ def _send_media_key(key_type: int) -> None:
         Quartz.CGEventPost(0, ev.CGEvent())
 
 
+def _media_key(key_type: int) -> Callable[[], None]:
+    """Return a handler that posts a Quartz HID media-key event."""
+    return lambda: _send_media_key(key_type)
+
+
+def _applescript(script: str) -> Callable[[], None]:
+    """
+    Return a non-blocking handler that runs an osascript one-liner.
+    Popen (fire-and-forget) avoids stalling the camera loop.
+    """
+    def _run() -> None:
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return _run
+
+
 # ── action registry ────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Action:
-    label:        str    # shown in the HUD overlay (keep ≤ ~10 chars)
-    key_type:     int    # NX_KEYTYPE_* constant
-    cooldown:     float  # seconds to lock out after firing
-    hold_seconds: float  # gesture must be held this long before firing (0 = instant)
+    label:        str                  # shown in the HUD overlay (keep ≤ ~10 chars)
+    handler:      Callable[[], None]   # called when the gesture fires
+    cooldown:     float                # seconds to lock out after firing
+    hold_seconds: float                # gesture must be held this long before firing (0 = instant)
 
 
 ACTIONS: dict[str, Action] = {
-    "thumbs_up":   Action("Vol +",      _NX_KEYTYPE_SOUND_UP,   cooldown=1.0, hold_seconds=0.0),
-    "thumbs_down": Action("Vol -",      _NX_KEYTYPE_SOUND_DOWN, cooldown=1.0, hold_seconds=0.0),
-    "fist":        Action("Play/Pause", _NX_KEYTYPE_PLAY,       cooldown=3.0, hold_seconds=0.35),
+    "thumbs_up":      Action("Vol +",      _media_key(_NX_KEYTYPE_SOUND_UP),   cooldown=1.0, hold_seconds=0.0),
+    "thumbs_down":    Action("Vol -",      _media_key(_NX_KEYTYPE_SOUND_DOWN), cooldown=1.0, hold_seconds=0.0),
+    "fist":           Action("Play/Pause", _media_key(_NX_KEYTYPE_PLAY),       cooldown=3.0, hold_seconds=0.35),
+    # HID track-skip events (17/18) are silently dropped by Apple Music on Tahoe;
+    # AppleScript targets Music.app directly and works regardless of focus.
+    "pointing_right": Action("Prev Track", _applescript('tell application "Music" to previous track'), cooldown=1.0, hold_seconds=0.0),
+    "pointing_left":  Action("Next Track", _applescript('tell application "Music" to next track'),     cooldown=1.0, hold_seconds=0.0),
 }
 
 # ── cooldown state ─────────────────────────────────────────────────────────────
@@ -135,7 +161,11 @@ def try_fire(gesture: str) -> str | None:
     """
     global _last_fired, _last_cooldown, _hold_gesture, _hold_since
 
+    _dbg = gesture == "pointing_left"
+
     if gesture not in ACTIONS:
+        if _dbg:
+            print(f"[DBG] pointing_left: not in ACTIONS", flush=True)
         _hold_gesture = ""   # gesture switched to something unmapped
         return None
 
@@ -149,13 +179,20 @@ def try_fire(gesture: str) -> str | None:
 
     # Gate 1 — hold duration not yet met
     if action.hold_seconds > 0 and (now - _hold_since) < action.hold_seconds:
+        if _dbg:
+            print(f"[DBG] pointing_left: gate1 hold {now - _hold_since:.2f}s / {action.hold_seconds}s", flush=True)
         return None
 
     # Gate 2 — post-fire cooldown still active
-    if cooldown_fraction() < 1.0:
+    cd = cooldown_fraction()
+    if cd < 1.0:
+        if _dbg:
+            print(f"[DBG] pointing_left: gate2 cooldown {cd:.2f}", flush=True)
         return None
 
-    _send_media_key(action.key_type)
+    if _dbg:
+        print(f"[DBG] pointing_left: firing handler", flush=True)
+    action.handler()
     _last_fired    = now
     _last_cooldown = action.cooldown
     return action.label
