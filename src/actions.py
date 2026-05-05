@@ -101,8 +101,8 @@ ACTIONS: dict[str, Action] = {
     "fist":           Action("Play/Pause", _media_key(_NX_KEYTYPE_PLAY),       cooldown=3.0, hold_seconds=0.35),
     # HID track-skip events (17/18) are silently dropped by Apple Music on Tahoe;
     # AppleScript targets Music.app directly and works regardless of focus.
-    "pointing_right": Action("Prev Track", _applescript('tell application "Music" to previous track'), cooldown=1.0, hold_seconds=0.0),
-    "pointing_left":  Action("Next Track", _applescript('tell application "Music" to next track'),     cooldown=1.0, hold_seconds=0.0),
+    "pointing_right": Action("Prev Track", _applescript('tell application "Music" to previous track'), cooldown=2.0, hold_seconds=0.0),
+    "pointing_left":  Action("Next Track", _applescript('tell application "Music" to next track'),     cooldown=2.0, hold_seconds=0.0),
 }
 
 # ── cooldown state ─────────────────────────────────────────────────────────────
