@@ -140,8 +140,6 @@ def run(
             label_text = label_map[smoothed]
 
             # ── fire action if gesture is mapped and cooldown has elapsed ──
-            if label_text == "pointing_left":
-                print(f"[DBG] pointing_left detected conf={confidence:.2f} smoothed={smoothed} label_map={label_map.get(smoothed)}", flush=True)
             fired = try_fire(label_text)
             if fired:
                 last_action_label = fired

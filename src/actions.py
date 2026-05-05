@@ -161,11 +161,7 @@ def try_fire(gesture: str) -> str | None:
     """
     global _last_fired, _last_cooldown, _hold_gesture, _hold_since
 
-    _dbg = gesture == "pointing_left"
-
     if gesture not in ACTIONS:
-        if _dbg:
-            print(f"[DBG] pointing_left: not in ACTIONS", flush=True)
         _hold_gesture = ""   # gesture switched to something unmapped
         return None
 
@@ -179,19 +175,12 @@ def try_fire(gesture: str) -> str | None:
 
     # Gate 1 — hold duration not yet met
     if action.hold_seconds > 0 and (now - _hold_since) < action.hold_seconds:
-        if _dbg:
-            print(f"[DBG] pointing_left: gate1 hold {now - _hold_since:.2f}s / {action.hold_seconds}s", flush=True)
         return None
 
     # Gate 2 — post-fire cooldown still active
-    cd = cooldown_fraction()
-    if cd < 1.0:
-        if _dbg:
-            print(f"[DBG] pointing_left: gate2 cooldown {cd:.2f}", flush=True)
+    if cooldown_fraction() < 1.0:
         return None
 
-    if _dbg:
-        print(f"[DBG] pointing_left: firing handler", flush=True)
     action.handler()
     _last_fired    = now
     _last_cooldown = action.cooldown
