@@ -20,7 +20,8 @@ GESTURES: dict[str, str] = {
     "peace":     "Index + middle fingers raised in a V, others curled",
     "thumbs_up": "Fist with thumb pointing straight up, other fingers curled",
     # ── new ─────────────────────────────────────────────────────────────────
-    "pointing":   "Index finger extended straight forward, all others curled into palm",
+    "pointing_right": "Right hand pointing left",
+    "pointing_left":  "Left hand pointing right",
     "stop":       "All fingers extended together, palm flat and facing the camera",
     "thumbs_down": "Fist with thumb pointing straight down, other fingers curled",
     # ── safety net ──────────────────────────────────────────────────────────
