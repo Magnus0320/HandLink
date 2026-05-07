@@ -1,6 +1,6 @@
 # HandLink: A Vision-Based Hand Gesture Recognition System for macOS Media Control
 
-HandLink recognises hand gestures in real time from a webcam and maps them to macOS media actions — volume up/down and play/pause — using native CoreGraphics HID events, fully compatible with macOS Tahoe.
+HandLink recognises hand gestures in real time from a webcam and maps them to macOS media actions — volume up/down, play/pause, and track skipping — fully compatible with macOS Tahoe.
 
 ---
 
@@ -9,10 +9,11 @@ HandLink recognises hand gestures in real time from a webcam and maps them to ma
 ```
 Webcam → MediaPipe HandLandmarker → Scale-normalised 63-D features
     → MLPClassifier + confidence gate → Temporal smoother (7-frame vote)
-    → Gesture label → Action dispatcher → CoreGraphics HID media-key event
+    → Gesture label → Action dispatcher → Quartz HID event  (volume / play-pause)
+                                        → osascript          (track skip)
 ```
 
-The classifier runs every frame. Only predictions above a confidence threshold enter the voting buffer; uncertain frames flush the buffer immediately. When a mapped gesture has been held continuously for its required hold duration (and the post-fire cooldown has elapsed), a Quartz HID event is posted directly into the macOS input stream — no Automation permission required.
+The classifier runs every frame. Only predictions above a confidence threshold enter the voting buffer; uncertain frames flush the buffer immediately. When a mapped gesture has been held continuously for its required hold duration (and the post-fire cooldown has elapsed), the action fires — either as a Quartz HID event or an AppleScript command, depending on the gesture.
 
 ---
 
@@ -23,9 +24,10 @@ The classifier runs every frame. Only predictions above a confidence threshold e
 | `fist` | All fingers curled tightly into palm | Play / Pause | 0.35 s | 3 s |
 | `thumbs_up` | Fist with thumb pointing straight up | Volume + | instant | 1 s |
 | `thumbs_down` | Fist with thumb pointing straight down | Volume − | instant | 1 s |
+| `pointing_right` | Right hand pointing left | Previous Track | instant | 2 s |
+| `pointing_left` | Left hand pointing right | Next Track | instant | 2 s |
 | `open_hand` | All five fingers fully extended and spread | *(recognised, no action)* | — | — |
 | `peace` | Index + middle fingers raised in a V | *(recognised, no action)* | — | — |
-| `pointing` | Index finger extended forward, others curled | *(recognised, no action)* | — | — |
 | `stop` | All fingers together, palm facing camera | *(recognised, no action)* | — | — |
 | `none` | Random non-gesture hand poses | *(silence class)* | — | — |
 
@@ -41,7 +43,8 @@ Gestures with no action are still classified and shown in the UI; they simply do
 | Computer vision | OpenCV |
 | ML classifier | scikit-learn `MLPClassifier` |
 | Numerical ops | NumPy |
-| macOS media control | `pyobjc-framework-Quartz` — CoreGraphics HID events |
+| macOS media control (vol / play) | `pyobjc-framework-Quartz` — CoreGraphics HID events |
+| macOS media control (track skip) | `osascript` — AppleScript targeting Music.app directly |
 
 **Requirements:** Python 3.10+, macOS, webcam.
 
@@ -80,9 +83,10 @@ python src/collect_data.py --gesture fist        --samples 300
 python src/collect_data.py --gesture open_hand   --samples 300
 python src/collect_data.py --gesture peace       --samples 300
 python src/collect_data.py --gesture thumbs_up   --samples 300
-python src/collect_data.py --gesture thumbs_down --samples 300
-python src/collect_data.py --gesture pointing    --samples 300
-python src/collect_data.py --gesture stop        --samples 300
+python src/collect_data.py --gesture thumbs_down    --samples 300
+python src/collect_data.py --gesture pointing_right --samples 300
+python src/collect_data.py --gesture pointing_left  --samples 300
+python src/collect_data.py --gesture stop           --samples 300
 
 # Silence class — collect varied non-gesture hand poses
 python src/collect_data.py --gesture none        --samples 500
@@ -163,7 +167,7 @@ To further reduce overfitting to a single person's hand, the training split (not
 - **Random 2-D in-plane rotation** ±20° around the wrist — simulates different hand tilts.
 - **Gaussian landmark noise** σ = 0.02 (in normalised units) — simulates finger-proportion variation and detector jitter.
 
-Combined with the 300-sample base and 5× augmentation, the MLP trains on ~9,800 samples for 7 gesture classes.
+Combined with the 300-sample base and 5× augmentation, the MLP trains on ~15,500 samples for 9 gesture classes.
 
 ### Classifier
 
@@ -184,11 +188,9 @@ Every frame, the raw classifier output goes through two filters before a label i
 
 ### Action system and macOS Tahoe compatibility
 
-Media controls use `Quartz.NSEvent.otherEventWithType…` + `CGEventPost` to post `NSSystemDefined` HID events with `NX_KEYTYPE_*` constants from `hidsystem/ev_keymap.h`. This is identical to what a physical media key produces and requires **no Automation or Accessibility permissions**.
+Each gesture maps to a handler function. There are two handler types:
 
-This approach was adopted because:
-- `osascript "set volume output volume"` silently fails on Tahoe without explicit Automation permission for the Python interpreter.
-- `tell application "System Events" to key code 179` opens the emoji picker on Tahoe — `179` is outside the standard 0–127 key code range.
+**Quartz HID** — posts an `NSSystemDefined` HID event via `CGEventPost`, identical to a physical media key press. Requires no Automation or Accessibility permissions. Used for volume and play/pause.
 
 | NX constant | Value | Used for |
 |---|---|---|
@@ -196,10 +198,21 @@ This approach was adopted because:
 | `NX_KEYTYPE_SOUND_DOWN` | 1 | Volume − |
 | `NX_KEYTYPE_PLAY` | 16 | Play / Pause toggle |
 
+**AppleScript** — runs `osascript` via a non-blocking `subprocess.Popen`, targeting Music.app directly. Used for track skipping because `NX_KEYTYPE_NEXT` (17) and `NX_KEYTYPE_PREVIOUS` (18) HID events are silently dropped by Apple Music on macOS Tahoe.
+
+```applescript
+tell application "Music" to next track
+tell application "Music" to previous track
+```
+
+This approach was adopted because:
+- `osascript "set volume output volume"` silently fails on Tahoe without Automation permission, but `tell application "Music" to …` works without it.
+- `tell application "System Events" to key code 179` opens the emoji picker on Tahoe — `179` is outside the standard 0–127 key code range.
+
 Each action has an independent **cooldown** (locks out re-firing) and an optional **hold duration** (gesture must be continuously detected before the action fires):
 
-- Volume gestures fire instantly with a 1-second cooldown.
-- Play/Pause requires a **0.35-second continuous hold** (prevents accidental triggers from a briefly-clenched fist) and a 3-second cooldown (prevents the toggle from flipping back immediately).
+- Volume and track-skip gestures fire instantly with 1-second and 2-second cooldowns respectively.
+- Play/Pause requires a **0.35-second continuous hold** (prevents accidental triggers from a briefly-clenched fist) and a 3-second cooldown.
 
 The hold timer resets whenever the gesture disappears — confidence drop, hand leaving frame, or gesture change — so a partial hold never carries over.
 
@@ -215,10 +228,11 @@ HandLink/
 │   ├── fist.npy
 │   ├── open_hand.npy
 │   ├── peace.npy
-│   ├── thumbs_up.npy
-│   ├── thumbs_down.npy
-│   ├── pointing.npy
+│   ├── pointing_left.npy
+│   ├── pointing_right.npy
 │   ├── stop.npy
+│   ├── thumbs_down.npy
+│   ├── thumbs_up.npy
 │   └── none.npy
 ├── models/
 │   ├── gesture_model.pkl        # Trained MLPClassifier
@@ -245,10 +259,14 @@ HandLink/
 
 ## Adding a New Action
 
-Edit `ACTIONS` in `src/actions.py`:
+Edit `ACTIONS` in `src/actions.py`. Use `_media_key()` for Quartz HID events or `_applescript()` for direct app control:
 
 ```python
-"pointing": Action("Action label", NX_KEYTYPE_CONSTANT, cooldown=1.0, hold_seconds=0.0),
+# Quartz HID (volume, play/pause)
+"my_gesture": Action("Label", _media_key(_NX_KEYTYPE_PLAY), cooldown=1.0, hold_seconds=0.0),
+
+# AppleScript (anything Music.app exposes)
+"my_gesture": Action("Label", _applescript('tell application "Music" to …'), cooldown=1.0, hold_seconds=0.0),
 ```
 
 No other file needs to change.
@@ -262,6 +280,7 @@ No other file needs to change.
 | Phantom gestures when hand is idle | Lower `--conf-threshold` slightly or collect more `none` samples |
 | Works for you but not others | Re-collect data at varied distances/tilts; scale invariance handles size differences |
 | Volume / play-pause has no effect | Install `pyobjc-framework-Quartz`: `pip install pyobjc-framework-Quartz` |
+| Track skip has no effect | Ensure Music.app is running — AppleScript requires the target app to be open |
 | "Missing model" error | Run `python src/train.py` first |
 | Webcam not opening | Check macOS camera permissions for Terminal / your IDE |
 | Gesture flickers between labels | Increase `--smoothing` (e.g. `--smoothing 12`) |
